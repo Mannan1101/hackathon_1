@@ -1,40 +1,151 @@
-# backend/main.py
 import os
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+import requests
+import xml.etree.ElementTree as ET
+import trafilatura
+from qdrant_client import QdrantClient
+from qdrant_client.models import VectorParams, Distance, PointStruct
+import cohere
 from dotenv import load_dotenv
 
 load_dotenv()
+# -------------------------------------
+# CONFIG
+# -------------------------------------
+# Your Deployment Link:
+SITEMAP_URL = "https://hackathon-1-eight-pi.vercel.app//sitemap.xml"
+COLLECTION_NAME = "humanoid_ai_book"
 
-app = FastAPI()
+cohere_client = cohere.Client("oUuAl4v8wIgcjVi5jXMCPNMsh5KsbiIuXzMHJStg")
+EMBED_MODEL = "embed-english-v3.0"
 
-# Add CORS middleware to allow frontend to connect
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (you can restrict this to specific domains)
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# Connect to Qdrant Cloud
+qdrant = QdrantClient(
+    url= os.getenv("QUDRANT_URL"),
+    api_key = os.getenv("QUDRANT_API_KEY")  
 )
 
-# Request model for chat endpoint
-class ChatRequest(BaseModel):
-    question: str
+# -------------------------------------
+# Step 1 — Extract URLs from sitemap
+# -------------------------------------
+def get_all_urls(sitemap_url):
+    xml = requests.get(sitemap_url).text
+    root = ET.fromstring(xml)
 
-@app.post("/chat")
-async def chat(request: ChatRequest):
-    # Simple response for testing purposes
-    # In production, use OpenAI, Qdrant, and DB connections
-    user_message = request.question.lower()
+    urls = []
+    for child in root:
+        loc_tag = child.find("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")
+        if loc_tag is not None:
+            urls.append(loc_tag.text)
 
-    if "hello" in user_message or "hi" in user_message:
-        bot_response = "Hello! How can I help you with the book today?"
-    elif "chapter" in user_message:
-        bot_response = "This textbook covers chapters on Physical AI and Humanoid Robotics. Which specific topic would you like to discuss?"
-    elif "robot" in user_message:
-        bot_response = "Humanoid robots are robots with human-like form and capabilities. They're designed to navigate human environments."
+    print("\nFOUND URLS:")
+    for u in urls:
+        print(" -", u)
+
+    return urls
+
+
+# -------------------------------------
+# Step 2 — Download page + extract text
+# -------------------------------------
+def extract_text_from_url(url):
+    html = requests.get(url).text
+    text = trafilatura.extract(html)
+
+    if not text:
+        print("[WARNING] No text extracted from:", url)
+
+    return text
+
+
+# -------------------------------------
+# Step 3 — Chunk the text
+# -------------------------------------
+def chunk_text(text, max_chars=1200):
+    chunks = []
+    while len(text) > max_chars:
+        split_pos = text[:max_chars].rfind(". ")
+        if split_pos == -1:
+            split_pos = max_chars
+        chunks.append(text[:split_pos])
+        text = text[split_pos:]
+    chunks.append(text)
+    return chunks
+
+
+# -------------------------------------
+# Step 4 — Create embedding
+# -------------------------------------
+def embed(text):
+    response = cohere_client.embed(
+        model="embed-english-v3.0",
+        input_type="search_query",  # Use search_query for queries
+        texts=[text],
+    )
+    if hasattr(response, 'embeddings') and len(response.embeddings) > 0: # type: ignore
+        return response.embeddings[0] # type: ignore
     else:
-        bot_response = f"I received your message: '{request.question}'. This is a sample response from the chatbot. In a full implementation, I would use OpenAI and Qdrant to provide a contextual answer based on the textbook content."
+        raise ValueError("Failed to get embedding from Cohere. The response did not contain any embeddings.")
 
-    return {"answer": bot_response}
+
+# -------------------------------------
+# Step 5 — Store in Qdrant
+# -------------------------------------
+def create_collection():
+    print("\nCreating Qdrant collection...")
+    qdrant.recreate_collection(
+        collection_name=COLLECTION_NAME,
+        vectors_config=VectorParams(
+        size=1024,        # Cohere embed-english-v3.0 dimension
+        distance=Distance.COSINE
+        )
+    )
+
+def save_chunk_to_qdrant(chunk, chunk_id, url):
+    vector = embed(chunk)
+
+    qdrant.upsert(
+        collection_name=COLLECTION_NAME,
+        points=[
+            PointStruct(
+                id=chunk_id,
+                vector=vector,
+                payload={
+                    "url": url,
+                    "text": chunk,
+                    "chunk_id": chunk_id
+                }
+            )
+        ]
+    )
+
+
+# -------------------------------------
+# MAIN INGESTION PIPELINE
+# -------------------------------------
+def ingest_book():
+    urls = get_all_urls(SITEMAP_URL)
+
+    create_collection()
+
+    global_id = 1
+
+    for url in urls:
+        print("\nProcessing:", url)
+        text = extract_text_from_url(url)
+
+        if not text:
+            continue
+
+        chunks = chunk_text(text)
+
+        for ch in chunks:
+            save_chunk_to_qdrant(ch, global_id, url)
+            print(f"Saved chunk {global_id}")
+            global_id += 1
+
+    print("\n✔️ Ingestion completed!")
+    print("Total chunks stored:", global_id - 1)
+
+
+if __name__ == "__main__":
+    ingest_book()
