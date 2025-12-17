@@ -25,7 +25,8 @@ import cohere
 from qdrant_client import QdrantClient
 
 # Initialize Cohere client
-cohere_client = cohere.Client("oUuAl4v8wIgcjVi5jXMCPNMsh5KsbiIuXzMHJStg")
+COHERE_API_KEY = os.getenv("COHERE_API_KEY")
+cohere_client = cohere.Client(COHERE_API_KEY)
 # Connect to Qdrant
 qdrant = QdrantClient(
     url= os.getenv("QUDRANT_URL"),

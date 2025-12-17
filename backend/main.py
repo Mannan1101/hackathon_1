@@ -15,7 +15,8 @@ load_dotenv()
 SITEMAP_URL = "https://hackathon-1-eight-pi.vercel.app//sitemap.xml"
 COLLECTION_NAME = "humanoid_ai_book"
 
-cohere_client = cohere.Client("oUuAl4v8wIgcjVi5jXMCPNMsh5KsbiIuXzMHJStg")
+COHERE_API_KEY = os.getenv("COHERE_API_KEY")
+cohere_client = cohere.Client(COHERE_API_KEY)
 EMBED_MODEL = "embed-english-v3.0"
 
 # Connect to Qdrant Cloud
